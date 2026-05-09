@@ -8,11 +8,22 @@ require('dotenv').config();
 // ✅ App init (sabse pehle)
 const app = express();
 
+// ================== CORS ==================
+app.use(cors({
+  origin: [
+    'https://growmorecrm.netlify.app',
+    'http://localhost:4200'
+  ],
+  credentials: true
+}));
+
+
 // ================== Middleware ==================
 app.use(express.json());
-app.use(cors());
 app.use(helmet());
 app.use(morgan('dev'));
+
+
 
 // ================== Models ==================
 require('./src/models/User');
@@ -44,6 +55,9 @@ app.use('/api/parts', partRoutes);
 app.get('/', (req, res) => {
   res.json({ message: 'GrowMore Backend is running!' });
 });
+
+// ================== PORT ==================
+const PORT = process.env.PORT || 5000;
 
 // ================== MongoDB Connection ==================
 mongoose.connect(process.env.MONGO_URI)
