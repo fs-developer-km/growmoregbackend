@@ -95,13 +95,19 @@ const amcSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 // Auto contract number
-amcSchema.pre('save', async function(next) {
+amcSchema.pre('save', async function () {
   if (!this.contractNumber) {
     const count = await mongoose.model('AMC').countDocuments();
     const year = new Date().getFullYear();
     this.contractNumber = `AMC-${year}-${String(count + 1).padStart(4, '0')}`;
   }
-  next();
+
 });
 
 module.exports = mongoose.model('AMC', amcSchema);
+
+
+
+// bro isme ek kam kro jaise tumne amc ke liye bnaya hai na to isme sidebar me aise he sabhi pages ke liye dropdown daal do dropdownn bana ke jitne bhe pages hai sabhi pages ko alag se dropdoen animation morden ke sath droppdown bana ke jitne bhe pages hai sabhi ke liye  daal do us se pata chal jayega ke hamare sidebar me all feature kya hai aise client ko ander ke featrer pata nahi chalega jab sidebar me dropdown hoge to us se ye pata chal jayega ke all feature hai ye bhe hai ye bhe hai sabhi hai
+
+// bro ye mera angular ka code hai isme mene layout ko chota change kiya tha mene isme sidebar me kuch dropdown add kiye the lekin iska structure bilkul change ho gaya hai iska main area content wala niche chla gaya hai check kro aur isko sahi karke do pura proper aur color code bhe shai karke do dark whiye sab sahi karke do propper code ke sath mobile me apne aap sidebar close ho jaye open close sab

@@ -32,6 +32,7 @@ require('./src/models/Lead');
 require('./src/models/Part');
 require('./src/models/JobCard');
 require('./src/models/Bill');
+require('./src/models/AMC');
 
 // ================== Routes ==================
 const authRoutes = require('./src/routes/authRoutes');
