@@ -42,6 +42,7 @@ const jobRoutes = require('./src/routes/jobRoutes');
 const billRoutes = require('./src/routes/billRoutes');
 const partRoutes = require('./src/routes/partRoutes');
 const reportRoutes = require('./src/routes/reportRoutes');
+const amcRoutes = require('./src/routes/amcRoutes');
 
 // ✅ Routes use (import ke baad hi use karo)
 app.use('/api/auth', authRoutes);
@@ -51,9 +52,9 @@ app.use('/api/leads', leadRoutes);
 app.use('/api/jobs', jobRoutes);
 app.use('/api/bills', billRoutes);
 app.use('/api/parts', partRoutes);
-
-
 app.use('/api/reports', reportRoutes);
+
+app.use('/api/amc', amcRoutes);
 
 // ================== Test Route ==================
 app.get('/', (req, res) => {
