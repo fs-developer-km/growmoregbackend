@@ -2,47 +2,49 @@ const Lead = require('../models/Lead');
 const Customer = require('../models/Customer');
 const User = require('../models/User');
 
-// Helper — timeline entry add karo
 const addTimeline = (lead, action, description, userId) => {
-  lead.timeline.push({
-    action,
-    description,
-    doneBy: userId,
-    doneAt: new Date()
-  });
+  lead.timeline.push({ action, description, doneBy: userId, doneAt: new Date() });
 };
 
-// @POST /api/leads — Create lead
+// @POST /api/leads
 const createLead = async (req, res) => {
   try {
     const {
       customerPhone, customerName, customerAddress,
-      applianceType, serviceType, description,
-      scheduledDate, area, priority, source, tags
+      applianceType, subProduct, subProduct2,
+      serviceType, description, reference,
+      customerType, scheduledDate, appointmentTime,
+      estimateAmount, area, priority, source, tags
     } = req.body;
 
     let customer = await Customer.findOne({ phone: customerPhone });
     if (!customer) {
       customer = await Customer.create({
-        name: customerName,
-        phone: customerPhone,
-        address: customerAddress,
-        area
+        name: customerName, phone: customerPhone,
+        address: customerAddress, area
       });
     }
 
+    // Auto detect repeat
+    const existingLeads = await Lead.countDocuments({ customer: customer._id });
+    const autoCustomerType = existingLeads > 0 ? 'Repeat' : 'Fresh';
+
     const lead = new Lead({
       customer: customer._id,
-      applianceType,
-      serviceType,
-      description,
-      scheduledDate,
+      applianceType, subProduct: subProduct || '',
+      subProduct2: subProduct2 || '',
+      serviceType, description: description || '',
+      reference: reference || '',
+      customerType: customerType || autoCustomerType,
+      scheduledDate, appointmentTime: appointmentTime || '',
+      estimateAmount: estimateAmount || 0,
       address: customerAddress || customer.address,
       area: area || customer.area,
       priority: priority || 'Medium',
       source: source || 'Phone Call',
       tags: tags || [],
-      assignedBy: req.user._id
+      assignedBy: req.user._id,
+      status: 'New'
     });
 
     addTimeline(lead, 'created', `Lead created by ${req.user.name}`, req.user._id);
@@ -52,34 +54,32 @@ const createLead = async (req, res) => {
       .populate('customer', 'name phone address area')
       .populate('assignedBy', 'name');
 
-    res.status(201).json({ success: true, message: 'Lead create ho gayi', lead: populated });
-
+    res.status(201).json({ success: true, message: 'Lead created successfully', lead: populated });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 
-// @GET /api/leads — All leads with advanced filters
+// @GET /api/leads
 const getAllLeads = async (req, res) => {
   try {
     const {
-      status, assignedTo, search,
-      applianceType, serviceType, source,
-      priority, area, isPinned,
-      startDate, endDate,
-      page = 1, limit = 50,
+      status, assignedTo, search, applianceType,
+      serviceType, source, priority, customerType,
+      area, isPinned, startDate, endDate,
+      page = 1, limit = 100,
       sortBy = 'createdAt', sortOrder = 'desc'
     } = req.query;
 
     let query = {};
-
     if (status) query.status = status;
     if (assignedTo) query.assignedTo = assignedTo === 'unassigned' ? null : assignedTo;
     if (applianceType) query.applianceType = applianceType;
     if (serviceType) query.serviceType = serviceType;
     if (source) query.source = source;
     if (priority) query.priority = priority;
+    if (customerType) query.customerType = customerType;
     if (area) query.area = { $regex: area, $options: 'i' };
     if (isPinned === 'true') query.isPinned = true;
 
@@ -101,12 +101,11 @@ const getAllLeads = async (req, res) => {
           { address: { $regex: search, $options: 'i' } }
         ]
       }).select('_id');
-
-      const customerIds = customers.map(c => c._id);
       query.$or = [
-        { customer: { $in: customerIds } },
+        { customer: { $in: customers.map(c => c._id) } },
         { description: { $regex: search, $options: 'i' } },
-        { area: { $regex: search, $options: 'i' } }
+        { area: { $regex: search, $options: 'i' } },
+        { reference: { $regex: search, $options: 'i' } }
       ];
     }
 
@@ -115,7 +114,6 @@ const getAllLeads = async (req, res) => {
     if (sortBy !== 'isPinned') sort.isPinned = -1;
 
     const total = await Lead.countDocuments(query);
-
     const leads = await Lead.find(query)
       .populate('customer', 'name phone address area')
       .populate('assignedTo', 'name phone')
@@ -124,22 +122,19 @@ const getAllLeads = async (req, res) => {
       .limit(Number(limit))
       .skip((Number(page) - 1) * Number(limit));
 
-    // Status counts
     const counts = await Lead.aggregate([
       { $group: { _id: '$status', count: { $sum: 1 } } }
     ]);
-
     const statusCounts = {};
     counts.forEach(c => { statusCounts[c._id] = c.count; });
 
     res.json({ success: true, total, page: Number(page), leads, statusCounts });
-
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 
-// @GET /api/leads/search — Smart search
+// @GET /api/leads/search
 const searchLeads = async (req, res) => {
   try {
     const { q } = req.query;
@@ -159,68 +154,58 @@ const searchLeads = async (req, res) => {
       const leadCount = await Lead.countDocuments({ customer: c._id });
       const completedCount = await Lead.countDocuments({ customer: c._id, status: 'Completed' });
       const bills = await require('../models/Bill').find({ customer: c._id });
-      const totalPaid = bills.filter(b => b.paymentStatus === 'Paid').reduce((s, b) => s + b.grandTotal, 0);
-
-      customerMatch = {
-        ...c.toObject(),
-        leadCount,
-        completedCount,
-        totalPaid,
-        isExisting: true
-      };
+      const totalPaid = bills.reduce((s, b) => s + (b.finalAmountReceived || b.grandTotal || 0), 0);
+      customerMatch = { ...c.toObject(), leadCount, completedCount, totalPaid, isExisting: leadCount > 0 };
     }
 
-    const leads = await Lead.find({
-      customer: { $in: customers.map(c => c._id) }
-    })
+    const leads = await Lead.find({ customer: { $in: customers.map(c => c._id) } })
       .populate('customer', 'name phone address')
       .populate('assignedTo', 'name')
       .sort({ createdAt: -1 })
       .limit(10);
 
     res.json({ success: true, leads, customer: customerMatch });
-
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 
-// @GET /api/leads/stats — Quick stats
+// @GET /api/leads/stats
 const getStats = async (req, res) => {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const [
-      totalLeads, todayLeads, newLeads,
-      assignedLeads, inProgressLeads,
-      completedLeads, cancelledLeads,
-      unattendedLeads, highPriority
-    ] = await Promise.all([
+    const [total, todayCount, fresh, repeat, newL, scheduled,
+           assigned, inProgress, completed, cancelled, pending,
+           unattended, highPriority] = await Promise.all([
       Lead.countDocuments(),
       Lead.countDocuments({ createdAt: { $gte: today } }),
+      Lead.countDocuments({ customerType: 'Fresh' }),
+      Lead.countDocuments({ customerType: 'Repeat' }),
       Lead.countDocuments({ status: 'New' }),
+      Lead.countDocuments({ status: 'Scheduled' }),
       Lead.countDocuments({ status: 'Assigned' }),
       Lead.countDocuments({ status: 'In Progress' }),
       Lead.countDocuments({ status: 'Completed' }),
       Lead.countDocuments({ status: 'Cancelled' }),
+      Lead.countDocuments({ status: 'Pending' }),
       Lead.countDocuments({
-        status: { $in: ['New', 'Assigned'] },
+        status: { $in: ['New', 'Assigned', 'Pending'] },
         createdAt: { $lte: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000) }
       }),
-      Lead.countDocuments({ priority: 'High', status: { $ne: 'Completed' } })
+      Lead.countDocuments({ priority: 'High', status: { $nin: ['Completed', 'Cancelled'] } })
     ]);
 
     res.json({
       success: true,
       stats: {
-        totalLeads, todayLeads, newLeads,
-        assignedLeads, inProgressLeads,
-        completedLeads, cancelledLeads,
-        unattendedLeads, highPriority
+        total, todayCount, fresh, repeat,
+        new: newL, scheduled, assigned, inProgress,
+        completed, cancelled, pending,
+        unattended, highPriority
       }
     });
-
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -230,32 +215,31 @@ const getStats = async (req, res) => {
 const getLeadById = async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id)
-      .populate('customer', 'name phone address area')
+      .populate('customer', 'name phone address area alternatePhone')
       .populate('assignedTo', 'name phone')
       .populate('assignedBy', 'name')
       .populate('notes.addedBy', 'name')
-      .populate('timeline.doneBy', 'name');
+      .populate('timeline.doneBy', 'name')
+      .populate('happyCall.calledBy', 'name');
 
-    if (!lead) return res.status(404).json({ message: 'Lead nahi mili' });
+    if (!lead) return res.status(404).json({ message: 'Lead not found' });
     res.json({ success: true, lead });
-
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 
-// @GET /api/leads/mine — Engineer ke leads
+// @GET /api/leads/mine
 const getMyLeads = async (req, res) => {
   try {
     const leads = await Lead.find({
       assignedTo: req.user._id,
-      status: { $in: ['Assigned', 'In Progress'] }
+      status: { $in: ['Assigned', 'Scheduled', 'In Progress', 'Pending'] }
     })
       .populate('customer', 'name phone address')
       .sort({ scheduledDate: 1 });
 
     res.json({ success: true, count: leads.length, leads });
-
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -265,18 +249,19 @@ const getMyLeads = async (req, res) => {
 const updateLead = async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
-    if (!lead) return res.status(404).json({ message: 'Lead nahi mili' });
+    if (!lead) return res.status(404).json({ message: 'Lead not found' });
 
-    const updatableFields = [
-      'applianceType', 'serviceType', 'description',
-      'scheduledDate', 'followUpDate', 'address',
-      'area', 'priority', 'source', 'tags',
-      'remarks', 'isPinned'
+    const fields = [
+      'applianceType', 'subProduct', 'subProduct2',
+      'serviceType', 'description', 'reference',
+      'customerType', 'scheduledDate', 'appointmentTime',
+      'estimateAmount', 'address', 'area', 'priority',
+      'source', 'tags', 'remarks', 'isPinned',
+      'workRemark', 'totalAmount', 'partsLpCost',
+      'finalAmount', 'companyShare', 'engineerShare'
     ];
 
-    updatableFields.forEach(field => {
-      if (req.body[field] !== undefined) lead[field] = req.body[field];
-    });
+    fields.forEach(f => { if (req.body[f] !== undefined) lead[f] = req.body[f]; });
 
     addTimeline(lead, 'updated', `Lead updated by ${req.user.name}`, req.user._id);
     await lead.save();
@@ -285,8 +270,7 @@ const updateLead = async (req, res) => {
       .populate('customer', 'name phone address')
       .populate('assignedTo', 'name phone');
 
-    res.json({ success: true, message: 'Lead update ho gayi', lead: updated });
-
+    res.json({ success: true, message: 'Lead updated', lead: updated });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -297,27 +281,20 @@ const assignLead = async (req, res) => {
   try {
     const { engineerId } = req.body;
     const lead = await Lead.findById(req.params.id);
-    if (!lead) return res.status(404).json({ message: 'Lead nahi mili' });
+    if (!lead) return res.status(404).json({ message: 'Lead not found' });
 
     const engineer = await User.findById(engineerId);
-
     lead.assignedTo = engineerId;
     lead.status = 'Assigned';
     lead.assignedBy = req.user._id;
-
-    addTimeline(lead, 'assigned',
-      `Assigned to ${engineer?.name} by ${req.user.name}`,
-      req.user._id
-    );
-
+    addTimeline(lead, 'assigned', `Assigned to ${engineer?.name} by ${req.user.name}`, req.user._id);
     await lead.save();
 
     const updated = await Lead.findById(lead._id)
       .populate('customer', 'name phone')
       .populate('assignedTo', 'name phone');
 
-    res.json({ success: true, message: 'Lead assign ho gayi', lead: updated });
-
+    res.json({ success: true, message: 'Lead assigned', lead: updated });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -328,21 +305,66 @@ const updateStatus = async (req, res) => {
   try {
     const { status, remarks } = req.body;
     const lead = await Lead.findById(req.params.id);
-    if (!lead) return res.status(404).json({ message: 'Lead nahi mili' });
+    if (!lead) return res.status(404).json({ message: 'Lead not found' });
 
     const oldStatus = lead.status;
     lead.status = status;
     if (remarks) lead.remarks = remarks;
-    if (status === 'Completed') lead.completedDate = new Date();
-
+    if (status === 'Completed') {
+      lead.completedDate = new Date();
+      lead.callCloseDate = new Date();
+    }
     addTimeline(lead, 'status_changed',
-      `Status changed from ${oldStatus} to ${status} by ${req.user.name}${remarks ? ' — ' + remarks : ''}`,
-      req.user._id
-    );
+      `Status: ${oldStatus} → ${status}${remarks ? ' — ' + remarks : ''}`,
+      req.user._id);
+    await lead.save();
+
+    res.json({ success: true, message: 'Status updated', lead });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// @PATCH /api/leads/:id/happy-call
+const updateHappyCall = async (req, res) => {
+  try {
+    const { called, satisfied, remarks, followUpRequired } = req.body;
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
+    lead.happyCall = {
+      called: called || false,
+      calledAt: called ? new Date() : null,
+      calledBy: called ? req.user._id : null,
+      satisfied,
+      remarks,
+      followUpRequired: followUpRequired || false
+    };
+    addTimeline(lead, 'happy_call', `Happy call recorded by ${req.user.name}`, req.user._id);
+    await lead.save();
+
+    res.json({ success: true, message: 'Happy call updated', happyCall: lead.happyCall });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// @PATCH /api/leads/:id/financials
+const updateFinancials = async (req, res) => {
+  try {
+    const { totalAmount, partsLpCost, finalAmount, companyShare, engineerShare, workRemark } = req.body;
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) return res.status(404).json({ message: 'Lead not found' });
+
+    if (totalAmount !== undefined) lead.totalAmount = totalAmount;
+    if (partsLpCost !== undefined) lead.partsLpCost = partsLpCost;
+    if (finalAmount !== undefined) lead.finalAmount = finalAmount;
+    if (companyShare !== undefined) lead.companyShare = companyShare;
+    if (engineerShare !== undefined) lead.engineerShare = engineerShare;
+    if (workRemark !== undefined) lead.workRemark = workRemark;
 
     await lead.save();
-    res.json({ success: true, message: 'Status update ho gaya', lead });
-
+    res.json({ success: true, message: 'Financials updated', lead });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -353,21 +375,11 @@ const bulkAssign = async (req, res) => {
   try {
     const { leadIds, engineerId } = req.body;
     const engineer = await User.findById(engineerId);
-
     await Lead.updateMany(
       { _id: { $in: leadIds } },
-      {
-        assignedTo: engineerId,
-        status: 'Assigned',
-        assignedBy: req.user._id
-      }
+      { assignedTo: engineerId, status: 'Assigned', assignedBy: req.user._id }
     );
-
-    res.json({
-      success: true,
-      message: `${leadIds.length} leads ${engineer?.name} ko assign ho gayi`
-    });
-
+    res.json({ success: true, message: `${leadIds.length} leads assigned to ${engineer?.name}` });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -377,17 +389,8 @@ const bulkAssign = async (req, res) => {
 const bulkStatus = async (req, res) => {
   try {
     const { leadIds, status } = req.body;
-
-    await Lead.updateMany(
-      { _id: { $in: leadIds } },
-      { status }
-    );
-
-    res.json({
-      success: true,
-      message: `${leadIds.length} leads ka status ${status} ho gaya`
-    });
-
+    await Lead.updateMany({ _id: { $in: leadIds } }, { status });
+    res.json({ success: true, message: `${leadIds.length} leads status updated to ${status}` });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -398,17 +401,14 @@ const addNote = async (req, res) => {
   try {
     const { text } = req.body;
     const lead = await Lead.findById(req.params.id);
-    if (!lead) return res.status(404).json({ message: 'Lead nahi mili' });
+    if (!lead) return res.status(404).json({ message: 'Lead not found' });
 
     lead.notes.push({ text, addedBy: req.user._id });
     addTimeline(lead, 'note_added', `Note added by ${req.user.name}`, req.user._id);
     await lead.save();
 
-    const updated = await Lead.findById(lead._id)
-      .populate('notes.addedBy', 'name');
-
-    res.json({ success: true, message: 'Note add ho gaya', notes: updated.notes });
-
+    const updated = await Lead.findById(lead._id).populate('notes.addedBy', 'name');
+    res.json({ success: true, notes: updated.notes });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -418,17 +418,10 @@ const addNote = async (req, res) => {
 const togglePin = async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
-    if (!lead) return res.status(404).json({ message: 'Lead nahi mili' });
-
+    if (!lead) return res.status(404).json({ message: 'Lead not found' });
     lead.isPinned = !lead.isPinned;
     await lead.save();
-
-    res.json({
-      success: true,
-      message: lead.isPinned ? 'Lead pin ho gayi' : 'Lead unpin ho gayi',
-      isPinned: lead.isPinned
-    });
-
+    res.json({ success: true, isPinned: lead.isPinned });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -438,55 +431,56 @@ const togglePin = async (req, res) => {
 const exportExcel = async (req, res) => {
   try {
     const { ids, status, startDate, endDate } = req.query;
-
     let query = {};
     if (ids) query._id = { $in: ids.split(',') };
     if (status) query.status = status;
     if (startDate || endDate) {
       query.createdAt = {};
       if (startDate) query.createdAt.$gte = new Date(startDate);
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59);
-        query.createdAt.$lte = end;
-      }
+      if (endDate) { const e = new Date(endDate); e.setHours(23,59,59); query.createdAt.$lte = e; }
     }
 
     const leads = await Lead.find(query)
-      .populate('customer', 'name phone address area')
+      .populate('customer', 'name phone address area alternatePhone')
       .populate('assignedTo', 'name phone')
       .sort({ createdAt: -1 });
 
-    let csv = '\uFEFF'; // BOM for Excel
-    csv += 'Lead ID,Customer Name,Phone,Address,Area,Appliance,Service,Status,Priority,Source,Engineer,Scheduled Date,Created Date,Amount Paid\n';
+    let csv = '\uFEFF';
+    csv += 'Registered Date,Cust Name,Ph No.,Alternate No.,Reference,Address,Area,Product,Sub Product,Sub Product 2,Repeat/Fresh,Type of Work,Problem,Engineer,App Date,App Time,Estimate,Call Close Date,Status,Remark,Total Amount,Part LP Cost,Final Amount,Company Share,Eng Share\n';
 
-    for (const lead of leads) {
-      const Bill = require('../models/Bill');
-      const bills = await Bill.find({ lead: lead._id, paymentStatus: 'Paid' });
-      const paid = bills.reduce((s, b) => s + b.grandTotal, 0);
-
+    leads.forEach(l => {
       csv += [
-        lead._id,
-        `"${lead.customer?.name || ''}"`,
-        lead.customer?.phone || '',
-        `"${lead.address || lead.customer?.address || ''}"`,
-        lead.area || lead.customer?.area || '',
-        lead.applianceType,
-        lead.serviceType,
-        lead.status,
-        lead.priority,
-        lead.source || '',
-        `"${lead.assignedTo?.name || 'Unassigned'}"`,
-        lead.scheduledDate ? new Date(lead.scheduledDate).toLocaleDateString('en-IN') : '',
-        new Date(lead.createdAt).toLocaleDateString('en-IN'),
-        paid > 0 ? `Rs.${paid}` : ''
+        new Date(l.createdAt).toLocaleDateString('en-IN'),
+        `"${l.customer?.name || ''}"`,
+        l.customer?.phone || '',
+        l.customer?.alternatePhone || '',
+        `"${l.reference || ''}"`,
+        `"${l.address || l.customer?.address || ''}"`,
+        l.area || l.customer?.area || '',
+        l.applianceType || '',
+        l.subProduct || '',
+        l.subProduct2 || '',
+        l.customerType || 'Fresh',
+        l.serviceType || '',
+        `"${l.description || ''}"`,
+        `"${l.assignedTo?.name || 'Unassigned'}"`,
+        l.scheduledDate ? new Date(l.scheduledDate).toLocaleDateString('en-IN') : '',
+        l.appointmentTime || '',
+        l.estimateAmount || 0,
+        l.callCloseDate ? new Date(l.callCloseDate).toLocaleDateString('en-IN') : '',
+        l.status || '',
+        `"${l.workRemark || l.remarks || ''}"`,
+        l.totalAmount || 0,
+        l.partsLpCost || 0,
+        l.finalAmount || 0,
+        l.companyShare || 0,
+        l.engineerShare || 0
       ].join(',') + '\n';
-    }
+    });
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename=leads-export-${Date.now()}.csv`);
+    res.setHeader('Content-Disposition', `attachment; filename=leads-${Date.now()}.csv`);
     res.send(csv);
-
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
@@ -495,7 +489,6 @@ const exportExcel = async (req, res) => {
 module.exports = {
   createLead, getAllLeads, searchLeads, getStats,
   getLeadById, getMyLeads, updateLead,
-  assignLead, updateStatus,
-  bulkAssign, bulkStatus,
-  addNote, togglePin, exportExcel
+  assignLead, updateStatus, updateHappyCall, updateFinancials,
+  bulkAssign, bulkStatus, addNote, togglePin, exportExcel
 };
